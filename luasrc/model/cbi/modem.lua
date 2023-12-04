@@ -20,6 +20,13 @@ simsel.rmempty = true
 pincode = section:taboption("general", Value, "pincode", translate("PIN密码"))
 pincode.readonly = true
 ------
+apnconfig = section:taboption("general", Value, "apnconfig", translate("APN接入点"),"必须填入APN,电信为ctnet,联通3gnet,移动cmnet")
+apnconfig.rmempty = true
+------------
+
+
+
+
 smode = section:taboption("advanced", ListValue, "smode", translate("网络制式"))
 smode.default = "0"
 smode:value("0", translate("自动"))
@@ -55,6 +62,7 @@ bandlist_sa:value("8", translate("BAND 8"))
 bandlist_sa:value("28", translate("BAND 28"))
 bandlist_sa:value("41", translate("BAND 41"))
 bandlist_sa:value("78", translate("BAND 78"))
+bandlist_sa:value("79", translate("BAND 79"))
 bandlist_sa:depends("nrmode","1")
 
 bandlist_nsa = section:taboption("advanced", ListValue, "bandlist_nsa", translate("5G-NSA频段"))
@@ -108,7 +116,7 @@ an.rmempty=false
 
 local apply = luci.http.formvalue("cbi.apply")
 if apply then
-    io.popen("/usr/share/modem/rm520n.sh &")
+    io.popen("/etc/init.d/modeminit start&")
 end
 
 return m,m2
