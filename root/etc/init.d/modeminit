@@ -13,7 +13,21 @@ start(){
    
 }
 
+printMsg() {
+    local msg="$1"
+    logger -t "${PROGRAM}" "${msg}"
+} #日志输出调用API
+
+
 modem_init(){
+
+  ipcheckLOCKFILE="/tmp/ipcheck.lock"
+  # Check if lockfile exists
+  if [ -f $ipcheckLOCKFILE ]; then
+      OLD_PID=$(cat $ipcheckLOCKFILE)
+      echo "$(date): Kill $OLD_PID" 
+      kill $OLD_PID
+  fi
     lock_file="/tmp/moduleInit.lock"
 
     if [ -e "$lock_file" ]; then
@@ -26,15 +40,21 @@ modem_init(){
         fi
     fi
      
-    Modem_Enable=$(uci -q get modem.@ndis[0].enable) || Modem_Enable=1
-    if [ "$Modem_Enable" -eq 0 ]; then
-        echo 1>/sys/class/gpio/cpe-pwr/value
-        echo "Modem_Enable: $Modem_Enable 模块禁用" >> /tmp/rm520n.log
-        exit 0
-    fi
-    check_and_updsate_simsel
-      echo "Module Initialization Pipeline START!!--------------------->" >>/tmp/moduleInit
-    /usr/share/modem/rm520n.sh &
+      Modem_Enable=`uci -q get modem.@ndis[0].enable` || Modem_Enable=1
+      #模块启动
+      #模块开关
+      if [ "$Modem_Enable" == 0 ]; then
+          echo 0 >/sys/class/gpio/cpe-pwr/value
+          printMsg "禁用模块，退出"
+          rm $lock_file
+          exit 0
+      else
+          printMsg "模块启用"
+          echo 1 >/sys/class/gpio/cpe-pwr/value
+          check_and_update_simsel
+          /usr/share/modem/rm520n.sh &
+      fi
+    
 }
 
 check_and_update_simsel() {

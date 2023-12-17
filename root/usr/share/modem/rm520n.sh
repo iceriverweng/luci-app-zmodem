@@ -1,5 +1,6 @@
 #!/bin/sh
 #By Zy143L
+#Icey:add module test function
 
 PROGRAM="RM520N_MODEM"
 printMsg() {
@@ -14,17 +15,44 @@ if [ -e "$lock_file" ]; then
   # 锁文件存在，获取锁定的进程 ID，并终止它
   locked_pid=$(cat "$lock_file")
   if [ -n "$locked_pid" ]; then
-    echo "Terminating existing rm520n.sh process (PID: $locked_pid)..." >>/tmp/moduleInit
+    echo "Terminating existing rm520n.sh process (PID: $locked_pid)" 
     kill "$locked_pid"
     sleep 2  # 等待一段时间确保进程终止
   fi
 fi
+
+ipcheckLOCKFILE="/tmp/ipcheck.lock"
+if [ -e "$ipcheckLOCKFILE" ]; then
+  # 锁文件存在，获取锁定的进程 ID，并终止它
+  ipcheckLOCKFILElocked_pid=$(cat "$ipcheckLOCKFILE")
+  if [ -n "$ipcheckLOCKFILElocked_pid" ]; then
+    printMsg "Terminating existing ipcheck.sh process (PID: $ipcheckLOCKFILElocked_pid)" 
+    kill "$ipcheckLOCKFILElocked_pid"
+    sleep 2  # 等待一段时间确保进程终止
+  fi
+fi
+
 
 # 创建新的锁文件，记录当前进程 ID
 echo "$$" > "$lock_file"
 sleep 2 && /sbin/uci commit
 Modem_Enable=`uci -q get modem.@ndis[0].enable` || Modem_Enable=1
 #模块启动
+#模块开关
+if [ "$Modem_Enable" == 0 ]; then
+    echo 0 >/sys/class/gpio/cpe-pwr/value
+    printMsg "禁用模块，退出"
+    rm $lock_file
+    exit 0
+else
+    printMsg "模块启用"
+    echo 1 >/sys/class/gpio/cpe-pwr/value
+fi
+
+
+
+
+
 
 Sim_Sel=`uci -q get modem.@ndis[0].simsel`|| Sim_Sel=0
 echo "simsel: $Sim_Sel" >> /tmp/moduleInit
@@ -44,8 +72,9 @@ Enable_PING=`uci -q get modem.@ndis[0].pingen` || Enable_PING=0
 PING_Addr=`uci -q get modem.@ndis[0].pingaddr` || PING_Addr="119.29.29.29"
 PING_Count=`uci -q get modem.@ndis[0].count` || PING_Count=10
 
+#模块开关
 if [ "$Modem_Enable" == 0 ]; then
-    echo 1 >/sys/class/gpio/cpe-pwr/value
+    echo 0 >/sys/class/gpio/cpe-pwr/value
     printMsg "禁用移动网络"
     echo "Modem_Enable: $Modem_Enable 模块禁用" >> /tmp/moduleInit
 fi
@@ -243,46 +272,192 @@ fi
         esac
 
 
+#Check if SIM or esim exist
+chkSimExt() {
+    simStat=$(sendat 2 'at+qsimstat?' | grep '+QSIMSTAT' | awk -F, '{print $2}'| tr -d '\r\n')
+    case $simStat in
+        1)
+            printMsg "SIM card is inserted."
+            #APN CONFiG 
+            apnconfig=`uci -q get modem.@ndis[0].apnconfig` || apnconfig=""
+            sendat_result=$(sendat 2  'AT+CGDCONT=1,"IPV4V6","'$apnconfig'"')
+            return 0
+            ;;
+        0)
+            printMsg "SIM card is not inserted. Exiting program."
+            exit 0
+            ;;
+        *)
+            printMsg "Unknown SIM card Insert status. Retrying..."
+            sleep 2
+            chksimext
+            ;;
+    esac
+}
 
+#Check if SIM Ready to use
+
+chkSimReady() {
+    chkSimReadyMAX_RETRIES=30
+    local simReady=$(sendat 2 'at+qinistat' | grep '+QINISTAT' | awk '{print $2}' | tr -d '\r\n')
+    while [ $moduleSetChkMAX_RETRIES -gt 0 ]; do
+        case $simReady in
+            7)
+                printMsg "SIM card is ready."
+                return 0
+                ;;
+            *)
+                    printMsg "Unknown SIM card Init status. Retrying..."
+                    chkSimReadyMAX_RETRIES=$((chkSimReadyMAX_RETRIES - 1))
+                    sleep 2
+                ;;
+        esac
+    done
+}
+
+#Check Module Hardware Set,pre check befroe everything
+moduleSetChk(){
+    moduleSetChkMAX_RETRIES=5
+    printMsg "Start Modem Hardware Check"
+    sendat 2 'at+qeth="rgmii","enable",1"'
+    mac_address=$(ifconfig |grep eth1|awk {'print $5'}) 
+    printMsg "WAN MAC $mac_address"
+
+    while [ $moduleSetChkMAX_RETRIES -gt 0 ]; do
+    success=true
+       
+       dataInterfaceChk=$(sendat 2 'AT+QCFG="data_interface"'|grep '+QCFG:'|awk -F \" {'print $3'}|tr -d '\r\n')
+        printMsg "dataInterfaceChk: $dataInterfaceChk"
+        if [ "$dataInterfaceChk" != ",1,0" ]; then
+            printMsg "dataInterfaceChk Status check failed."
+            sendat 2 'AT+QCFG="data_interface",1,0'
+            echo 0 >/sys/class/gpio/cpe-pwr/value
+            sleep 1
+            echo 1 >/sys/class/gpio/cpe-pwr/value
+            reboot  #must hard reboot
+            success=false
+            #todo
+        fi
+        
+       pcieStat=$(sendat 2 'AT+QCFG="pcie/mode"' | grep '+QCFG' | awk -F, '{print $2}' | tr -d '\r\n')
+        printMsg "PCIe Status: $pcieStat"
+        if [ "$pcieStat" != "1" ]; then
+            printMsg "PCIe Status check failed."
+            sendat 2 'AT+QCFG="pcie/mode",1'
+            success=false
+            #todo
+        fi
+
+        ethR8125Stat=$(sendat 2 'at+qeth="eth_driver"'|grep '"r8125",1'|awk -F , {'print $3'}|tr -d '\r\n')
+        printMsg "ethR8125Stat Status: $ethR8125Stat"
+        if [ "$ethR8125Stat" != "1" ]; then
+            printMsg "ethR8125Stat Status check failed."
+            sendat 2 'AT+QETH="eth_driver","r8125",1'
+            success=false
+        fi
+
+        ipptMac=$(sendat 2 'at+qeth="ipptmac"'|grep '+QETH'|awk -F , {'print $2'}|tr -d '\r\n')
+        printMsg "ipptMac Status: $ipptMac"
+        if [ "$ipptMac" != "$mac_address" ]; then
+            printMsg "ipptMac Status check failed."
+            sendat 2 'AT+QETH="ipptmac",'$mac_address''
+            success=false
+        fi
+
+        ipptNatStat=$(sendat 2 'at+qmap="ippt_nat"' |grep '+QMAP'|awk -F , '{print $2}'|tr -d '\r\n')
+        printMsg "ipptNatStat Status: $ipptNatStat"
+        if [ "$ipptNatStat" != "0" ]; then
+            printMsg "ipptNatStat Status check failed."
+            sendat 2 'AT+QMAP="ippt_nat",0'
+            success=false
+        fi
+
+        mpdnruleStat=$(sendat 2 'at+qmap="mpdn_rule"' | grep '+QMAP: "MPDN_rule",0,1,0,1,1' | tr -d '\r\n')
+        printMsg "mpdnruleStat Status: $mpdnruleStat"
+        if ! echo "$mpdnruleStat" | grep -q "0,1,0,1,1"; then
+            printMsg "mpdnruleStat Status check failed."
+            sendat 2 'at+qmap="mpdn_rule",0'
+            sleep 3
+            sendat 2 'AT+QMAP="mpdn_rule",0,1,0,1,1,"'$mac_address'"'
+            sleep 5
+            success=false
+        fi
+
+        cmgfStat=$(sendat 2 'at+cmgf?'|grep '+CMGF'|awk -F : {'print $2'}|tr -d '\r\n')
+        printMsg "cmgfStat Status: $cmgfStat"
+        if [ "$cmgfStat" != " 0" ]; then
+            printMsg "cmgfStat Status check failed."
+            sendat 2 'at+cmgf=0'
+            success=false
+        fi
+
+        imsStat=$(sendat 2 'AT+QCFG="ims",1'|grep '+QCFG'|awk -F , {'print $2'}|tr -d '\r\n')
+        printMsg "imsStat Status: $imsStat"
+        if [ "$imsStat" != "1" ]; then
+            printMsg "imsStat Status check failed."
+            sendat 2 'AT+QCFG="ims",1' 
+            success=false
+        fi
+
+        autosel=$(sendat 2 'AT+QMBNCFG="autosel",1'|grep '+QMBNCFG'|awk -F , {'print $2'}|tr -d '\r\n')
+        printMsg "autosel Status: $autosel"
+        if [ "$imsStat" != "1" ]; then
+            printMsg "imsStat Status check failed."
+            sendat 2 'AT+QMBNCFG="autosel",1' 
+            success=false
+        fi
+
+
+        if [ "$success" = false ]; then
+                moduleSetChkMAX_RETRIES=$(($moduleSetChkMAX_RETRIES - 1))
+                printMsg "Recheck Hardware Set...."
+                sleep 2
+        else
+            printMsg "Hardware Check Complete."
+            return 0
+        fi
+        
+    done
+
+}
 
 #Check if wan work
 check_and_activate_wan() {
-  echo "Internet IP Check START--------------------->" >>/tmp/moduleInit
-
-  max_retries=10
-  retry_interval=30
+  max_retries=60
+  retry_interval=3
   retries=0
 
   while [ "$retries" -lt "$max_retries" ]; do
-    ipv4_info=$(sendat 2 'at+qmap="wwan"' | grep IPV4)
-
-    ipv4_address=$(echo "$ipv4_info" | awk -F',' '{print $5}' | tr -d '"')
-    echo $(valid_ip "$ipv4_address")
-    if [ -z "$ipv4_address" ] || ! valid_ip "$ipv4_address" ; then
-      echo "Retry $((retries + 1)): IPv4 address not obtained or invalid. Retrying in $retry_interval seconds..." >>/tmp/moduleInit
+    sendat 2  'AT+QMAP="connect",0,1'
+    sleep 1
+    ipv4_info=$(sendat 2 'at+qmap="wwan"' | grep IPV4|awk -F \" {'print $6'}|tr -d '\r\n')
+    printMsg "Modem ip is now $ipv4_info"
+    if [ -z "$ipv4_info" ] || ! valid_ip "$ipv4_info" ; then
+      printMsg "Retry $((retries + 1)): IPv4 address not obtained or invalid. Retrying in $retry_interval seconds..."
+      sleep 1
       sleep "$retry_interval"
       retries=$((retries + 1))
     else
-      echo "IPv4 address obtained: $ipv4_address" >>/tmp/moduleInit
       /sbin/ifup wan up
       /sbin/ifup wan6 up
-      echo "WAN UP!Ready to go Internet!" >>/tmp/moduleInit
-      rm /tmp/rm520n.lock
-    echo '<------------------------------------------------All Job is done' >> /tmp/moduleInit
+      printMsg "WAN UP!Ready to go Internet!"
+    rm $lock_file
+      sleep 10
+      /usr/share/modem/ipcheck.sh &
       exit 0
     fi
   done
 
   if [ "$retries" -eq "$max_retries" ]; then
-    echo "Failed to obtain valid IPv4 address after $max_retries retries. Exiting program." >>/tmp/moduleInit
+    printMsg "Failed to obtain valid IPv4 address after $max_retries retries. Exiting program." >>/tmp/moduleInit
+    printMsg "Job is FAILURE"
+
     exit 1
   fi
 }
 
 valid_ip() {
   local ip=$1
-  local UNCONNIP="0.0.0.0"
-  echo $ip|hexdump -c >>/tmp/moduleInit
 
   # 包含IP地址的正则表达式
   if echo "$ip" | grep -q -E '([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)'; then
@@ -297,92 +472,21 @@ valid_ip() {
   return 1  # 返回 1 表示错误
 }
 
-check_module_startup() {
-  echo "Module BOOT and SIM Check START--------------------->" >>/tmp/moduleInit
-  max_retries=10
-  retry_interval=15
-  retries=0
-  while [ "$retries" -lt "$max_retries" ]; do
-    # 使用 sendat 命令检测模块启动状态
-    qinistat_result=$(sendat 2 'at+qinistat')
-
-    # 检查返回值是否包含 "+QINISTAT: 7"
-    if echo "$qinistat_result" | grep -q "+QINISTAT: 7"; then
-      echo "Module SIM Init Ready,start successfully.">>/tmp/moduleInit
-    echo '<------------------------------------------------End Check' >> /tmp/moduleInit
-      return 0
-    else
-      echo "Retry $((retries + 1)): Module not started or SIM card initialization failed. Retrying in $retry_interval seconds...">>/tmp/moduleInit
-      sleep "$retry_interval"
-      retries=$((retries + 1))
-    fi
-  done
-
-  # 检查是否达到最大重试次数
-  if [ "$retries" -eq "$max_retries" ]; then
-    echo "Failed to start module after $max_retries retries. Exiting program.">>/tmp/moduleInit
-    rm /tmp/rm520n.lock
-    exit 1
-  fi
-}
-
-#icey@20231202
-rm520n_ippt_init(){
-    echo "Module IPPT Mode Initialization START--------------------->" >>/tmp/moduleInit
+moduleStartCheckLine(){
     /sbin/ifup wan down
     /sbin/ifup wan6 down
-    echo 'WAN DOWN!' >> /tmp/moduleInit
-    mac_address=FF:FF:FF:FF:FF:FF
-    echo "WAN MAC is $mac_address"
-    send_at_command 'AT+QETH="ipptmac",'$mac_address''
-    send_at_command 'at+qmap="mpdn_rule",0'
-    send_at_command 'AT+QMAP="mpdn_rule",0,1,0,1,1,"'$mac_address'"'
-    sleep 10 
-    send_at_command 'AT+QMAP="dhcpv4dns","disable"'
-    send_at_command 'AT+QMAP="dhcpv6dns","disable"'
-    send_at_command 'AT+QMAP="ippt_nat",0'
-    #配置自定义APN
-    apnconfig=`uci -q get modem.@ndis[0].apnconfig` || apnconfig=""
-    sendat_result=$(sendat 2  'AT+CGDCONT=1,"IPV4V6","'$apnconfig'"')
-    echo "APN Result: $sendat_result" >> /tmp/moduleInit
-    send_at_command 'AT+cfun=1,1'
-    echo '<------------------------------------------------End Init' >> /tmp/moduleInit
-}
+    chkSimExt
+    echo "chkSimExt $?" 
+    chkSimReady
+    echo "chkSimReady $?" 
+    moduleSetChk
+    echo "moduleSetChk $?" 
+    check_and_activate_wan
 
-send_at_command() {
-  command="$1"
-  max_retries=3
-  retries=0
-
-  while [ "$retries" -lt "$max_retries" ]; do
-    # 使用 sendat 命令发送 AT 指令并获取返回值
-    response=$(sendat 2 "$command")
-
-    # 检查返回值是否包含 "No response from modem."
-    if echo "$response" | grep -q "No response from modem."; then
-      echo "Retry $((retries + 1)): No response from modem. Retrying in 3 seconds...">>/tmp/moduleInit
-      sleep 5
-      retries=$((retries + 1))
-    else
-      # 成功收到响应，打印响应并退出循环
-      echo "$command Response received: $response" >>/tmp/moduleInit
-      break
-    fi
-  done
-
-  # 检查是否达到最大重试次数
-  if [ "$retries" -eq "$max_retries" ]; then
-    echo "Failed to receive response at command $command after $max_retries retries. Exiting." >>/tmp/moduleInit
-    exit 1
-  fi
 }
 
 
-echo "Module Initialization Pipeline START--------------------->" >>/tmp/moduleInit
-rm520n_ippt_init
-echo "Wait 20s for Module reboot!--------------------->" >>/tmp/moduleInit
-sleep 20
-check_module_startup
-check_and_activate_wan
+#start
+moduleStartCheckLine
 
 exit

@@ -20,7 +20,7 @@ simsel.rmempty = true
 pincode = section:taboption("general", Value, "pincode", translate("PIN密码"))
 pincode.readonly = true
 ------
-apnconfig = section:taboption("general", Value, "apnconfig", translate("APN接入点"),"必须填入APN,电信为ctnet,联通3gnet,移动cmnet")
+apnconfig = section:taboption("general", Value, "apnconfig", translate("APN接入点"))
 apnconfig.rmempty = true
 ------------
 
@@ -116,7 +116,7 @@ an.rmempty=false
 
 local apply = luci.http.formvalue("cbi.apply")
 if apply then
-    io.popen("/etc/init.d/modeminit start&")
+    io.popen("/usr/share/modem/rm520n.sh &")
 end
 
 return m,m2
